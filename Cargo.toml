@@ -1,0 +1,37 @@
+[package]
+name = "file-finder-h"
+version = "0.2.1"
+edition = "2024"
+license = "MIT"
+authors = ["HexBrowns"]
+description = "FileFinder_H - 指定フォルダ以下のファイルをあいまい検索してタイムラインに挿入する AviUtl2 プラグイン"
+publish = false
+
+[lib]
+name = "file_finder_h"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+notify = "8"
+# 0.47 の最小サポートは本体 2.1.10（2026-09-23 時点の本番は 2011000）
+aviutl2 = { version = "0.47", features = ["generic", "serde"] }
+aviutl2-eframe = "0.47"
+itertools = "0.15"
+nucleo-matcher = "0.3.1"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
