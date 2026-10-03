@@ -1,5 +1,7 @@
 # FileFinder_H マニュアル
 
+<img src="images/FileFinder_H_screen.png" width="360">
+
 **FileFinder_H** は、指定したフォルダ以下のファイルを**あいまい検索**して、クリック 1 回（またはドラッグ）でタイムラインに置くプラグイン（Rust 製 `.aux2`）です。
 Rusty Scripts Search（エフェクトの検索）と同じ操作感で素材フォルダを探せ、ファイル検索ソフト **Everything** の使い勝手（種類のフィルタ・並べ替え・`ext:` などの検索構文・変更の自動反映）も取り入れています。
 
