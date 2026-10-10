@@ -83,6 +83,8 @@ pub(crate) struct FileFinderApp {
     new_root_text: String,
     dialog: Option<mpsc::Receiver<Option<PathBuf>>>,
     clear_history_armed: Option<Instant>,
+    /// Esc で設定の小窓を閉じてよいかの判定
+    esc_dismiss: EscDismiss,
 
     status: String,
     status_is_error: bool,
@@ -143,6 +145,7 @@ impl FileFinderApp {
             new_root_text: String::new(),
             dialog: None,
             clear_history_armed: None,
+            esc_dismiss: EscDismiss::default(),
             status_is_error: !warning.is_empty(),
             status: warning,
         };
@@ -235,6 +238,7 @@ impl FileFinderApp {
 
 impl eframe::App for FileFinderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let esc_closes = self.esc_dismiss.pressed(ui.ctx());
         self.poll_dialog();
         let results = self.current_results();
 
@@ -242,6 +246,11 @@ impl eframe::App for FileFinderApp {
         egui::Panel::bottom("status").show(ui, |ui| self.render_status(ui, results.as_deref()));
         egui::CentralPanel::default().show(ui, |ui| self.render_list(ui, results));
         self.render_settings(ui);
+        // フォルダ選択ダイアログの結果を待っている間は閉じない（選んだフォルダの行き先が無くなる）
+        if esc_closes && self.show_settings && self.dialog.is_none() {
+            self.show_settings = false;
+        }
+        self.esc_dismiss.end_frame(ui.ctx());
     }
 }
 
@@ -517,15 +526,30 @@ impl FileFinderApp {
                 response.request_focus();
                 self.focus_search = false;
             }
+            // 打つたびに絞り込む欄なので、確定を待たずに使う。Esc は search_escape のとおり
+            let before_key = response.id.with("before_edit");
+            if response.gained_focus() {
+                ui.data_mut(|d| d.insert_temp(before_key, self.needle.clone()));
+            }
             if response.lost_focus() {
+                let before = ui.data_mut(|d| d.remove_temp::<String>(before_key));
                 let (enter, escape) =
                     ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
                 if enter {
                     self.insert_selected(results);
                     self.focus_search = true;
-                } else if escape && !self.needle.is_empty() {
-                    self.needle.clear();
-                    self.focus_search = true;
+                } else if escape {
+                    match search_escape(&self.needle, before.as_deref()) {
+                        SearchEscape::Revert(text) => {
+                            self.needle = text;
+                            self.focus_search = true;
+                        }
+                        SearchEscape::Clear => {
+                            self.needle.clear();
+                            self.focus_search = true;
+                        }
+                        SearchEscape::Release => {}
+                    }
                 }
             }
             if ui
@@ -702,6 +726,63 @@ impl FileFinderApp {
         } else if let Some(row) = dragged {
             self.selected = row;
             self.do_drag(&index.entries[hits[row].entry]);
+        }
+    }
+}
+
+/// Esc で小さなウィンドウを閉じてよいか（ルール au2-rs-plugin「入力の確定と取り消し」。参照実装 `MidpointTable_H` の `busy_last_frame`）。
+/// 閉じるのは、押す前にどこにもフォーカスが無く、ポップアップも開いていなかったときだけ
+/// （入力中・並べ替えの一覧・右クリックのメニューの Esc は、そちらを取り消すだけにする）。
+/// egui はフレームの始めに Esc でフォーカスを外しているので、前のフレームの終わりの状態で見る
+#[derive(Debug, Default)]
+struct EscDismiss {
+    busy_last_frame: bool,
+}
+
+impl EscDismiss {
+    /// フレームの始めに呼ぶ
+    fn pressed(&self, ctx: &egui::Context) -> bool {
+        ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.busy_last_frame
+    }
+
+    /// フレームの終わり（すべて描いた後）に呼ぶ
+    fn end_frame(&mut self, ctx: &egui::Context) {
+        self.busy_last_frame = ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open();
+    }
+}
+
+/// 検索欄で Esc を押したときにすること（ルール au2-rs-plugin「入力の確定と取り消し」）
+#[derive(Debug, PartialEq)]
+enum SearchEscape {
+    /// 入力を始める前の文字に戻し、欄にフォーカスを戻す
+    Revert(String),
+    /// 空にして、欄にフォーカスを戻す（決まりより前からの動き。打ち直さずに全件へ戻れる）
+    Clear,
+    /// 何もしない。フォーカスは外れたままにして、キーを本体へ返す
+    Release,
+}
+
+/// `before` は欄にフォーカスが入ったときの文字。
+/// 入力していれば 1 回目の Esc で入力前に戻し、何も打っていなければ空にし、空なら欄から抜ける
+fn search_escape(current: &str, before: Option<&str>) -> SearchEscape {
+    match before {
+        Some(b) if b != current => SearchEscape::Revert(b.to_string()),
+        _ if !current.is_empty() => SearchEscape::Clear,
+        _ => SearchEscape::Release,
+    }
+}
+
+/// 1 行の入力欄の後に呼ぶ。入力中に Esc を押したら、入力を始める前の文字に戻す
+/// （参照実装 `MidpointTable_H/src/gui.rs` の `number_text`）
+fn revert_on_escape(ui: &egui::Ui, response: &egui::Response, text: &mut String) {
+    let key = response.id.with("before_edit");
+    if response.gained_focus() {
+        ui.data_mut(|d| d.insert_temp(key, text.clone()));
+    }
+    if response.lost_focus() {
+        let before = ui.data_mut(|d| d.remove_temp::<String>(key));
+        if let (true, Some(b)) = (ui.input(|i| i.key_pressed(egui::Key::Escape)), before) {
+            *text = b;
         }
     }
 }
@@ -1007,6 +1088,8 @@ impl FileFinderApp {
                 .hint_text("パスを貼り付けて追加")
                 .desired_width((ui.available_width() - 60.0).max(60.0))
                 .show(ui);
+            // 使うのは Enter か「追加」を押したときだけ（ほかをクリックしただけでは足さない）
+            revert_on_escape(ui, &te.response, &mut self.new_root_text);
             let entered = te.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("追加").clicked() || entered) && !self.new_root_text.trim().is_empty() {
                 let path = PathBuf::from(self.new_root_text.trim().trim_matches('"'));
@@ -1019,6 +1102,7 @@ impl FileFinderApp {
         ui.checkbox(&mut self.draft.all_files, "すべてのファイルを対象にする（拡張子で絞らない）");
         ui.add_enabled_ui(!self.draft.all_files, |ui| {
             ui.label("対象の拡張子（空白かカンマ区切り。.object はエイリアスとして挿入）");
+            // 複数行の欄なので Esc で戻さない（フォーカスを外すだけ）。使うのは「適用して読み込む」を押したとき
             ui.add(
                 egui::TextEdit::multiline(&mut self.draft.extensions)
                     .desired_rows(2)
@@ -1070,6 +1154,12 @@ fn push_root(config: &mut Config, path: PathBuf) {
 
 #[cfg(test)]
 mod tests {
+    /// テストの 1 フレームの出力を捨てる。テクスチャの差分を片付けずに捨てると、デバッグビルドで epaint の debug_assert
+    /// （Dropped TexturesDelta with N unapplied deltas）が落ちる（au2 release の prebuild の cargo test はデバッグビルド）
+    fn discard_frame(mut out: egui::FullOutput) {
+        out.textures_delta.clear();
+    }
+
     use super::*;
     use crate::index::make_entry;
 
@@ -1188,6 +1278,96 @@ mod tests {
         assert_eq!(format_size(1536), "1.5 KB");
         assert_eq!(format_size(20 << 20), "20 MB");
         assert_eq!(format_size(3 << 30), "3.0 GB");
+    }
+
+    #[test]
+    fn search_escape_reverts_then_clears_then_releases() {
+        // 入力前 "rain" に " bgm" を打った → 1 回目の Esc で "rain" に戻す
+        assert_eq!(search_escape("rain bgm", Some("rain")), SearchEscape::Revert("rain".into()));
+        // 戻した後（フォーカスを入れ直したので入力前も "rain"）→ 空にする
+        assert_eq!(search_escape("rain", Some("rain")), SearchEscape::Clear);
+        // 空 → 欄から抜ける
+        assert_eq!(search_escape("", Some("")), SearchEscape::Release);
+        // 空の欄に打ってから Esc → 空に戻す（従来の「空にする」と同じ結果）
+        assert_eq!(search_escape("abc", Some("")), SearchEscape::Revert(String::new()));
+        // 入力前の文字を覚えていない（フォーカスが入ったフレームを通っていない）ときは従来どおり
+        assert_eq!(search_escape("abc", None), SearchEscape::Clear);
+        assert_eq!(search_escape("", None), SearchEscape::Release);
+    }
+
+    // ---- egui だけで動かす ----
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
+    }
+
+    fn input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// 1 行の欄を 1 フレーム描く。`focus` なら描いた後にフォーカスを入れる（`focus_search` と同じ順）
+    fn text_frame(ctx: &egui::Context, text: &mut String, focus: bool, events: Vec<egui::Event>) {
+        discard_frame(ctx.run_ui(input(events), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(text));
+            if focus {
+                response.request_focus();
+            }
+            revert_on_escape(ui, &response, text);
+        }));
+    }
+
+    #[test]
+    fn escape_restores_text_before_editing() {
+        let ctx = egui::Context::default();
+        let mut text = String::from("C:/素材");
+        text_frame(&ctx, &mut text, true, vec![]);
+        text_frame(&ctx, &mut text, false, vec![egui::Event::Text("/BGM".into())]);
+        assert_eq!(text, "C:/素材/BGM");
+        text_frame(&ctx, &mut text, false, vec![key(egui::Key::Escape)]);
+        assert_eq!(text, "C:/素材");
+        // フォーカスを失った扱いが続くフレームでも、そのまま
+        text_frame(&ctx, &mut text, false, vec![]);
+        text_frame(&ctx, &mut text, false, vec![]);
+        assert_eq!(text, "C:/素材");
+    }
+
+    #[test]
+    fn enter_keeps_typed_text() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        text_frame(&ctx, &mut text, true, vec![]);
+        text_frame(&ctx, &mut text, false, vec![egui::Event::Text("D:/x".into())]);
+        text_frame(&ctx, &mut text, false, vec![key(egui::Key::Enter)]);
+        text_frame(&ctx, &mut text, false, vec![key(egui::Key::Escape)]);
+        assert_eq!(text, "D:/x");
+    }
+
+    #[test]
+    fn escape_closes_only_when_nothing_was_focused() {
+        let ctx = egui::Context::default();
+        let mut dismiss = EscDismiss::default();
+        let mut text = String::new();
+        let mut frame = |focus: bool, events: Vec<egui::Event>, dismiss: &mut EscDismiss| {
+            let mut closes = false;
+            discard_frame(ctx.run_ui(input(events), |ui| {
+                closes = dismiss.pressed(ui.ctx());
+                let response = ui.add(egui::TextEdit::singleline(&mut text));
+                if focus {
+                    response.request_focus();
+                }
+                dismiss.end_frame(ui.ctx());
+            }));
+            closes
+        };
+        assert!(!frame(true, vec![], &mut dismiss));
+        // 入力中の Esc はフォーカスを外すだけ（egui はこのフレームの始めにフォーカスを外している）
+        assert!(!frame(false, vec![key(egui::Key::Escape)], &mut dismiss));
+        // どこにもフォーカスが無いときの Esc で閉じる
+        assert!(frame(false, vec![key(egui::Key::Escape)], &mut dismiss));
     }
 
     #[test]
