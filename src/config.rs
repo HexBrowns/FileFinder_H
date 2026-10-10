@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::index::Kind;
+use crate::store::{self, Loaded};
 
 pub const DEFAULT_EXTENSIONS: &str = "png jpg jpeg bmp gif webp tif tiff \
      mp4 mov mkv avi webm wmv m4v mpg mpeg ts flv \
@@ -113,7 +114,10 @@ pub struct Config {
     pub include_hidden: bool,
     /// true ならフォルダの変更を監視して読み込み直す
     pub auto_update: bool,
+    /// 値が増えうる列挙は、知らない値（新しい版が書いたもの）を初期値に読み替える。ファイル全体を捨てないため
+    #[serde(deserialize_with = "crate::store::lenient")]
     pub kind_filter: KindFilter,
+    #[serde(deserialize_with = "crate::store::lenient")]
     pub sort: SortKey,
     pub descending: bool,
 }
@@ -151,42 +155,14 @@ pub fn default_path() -> PathBuf {
         .join("config.json")
 }
 
-/// 読み込む。無ければ既定値。壊れていたら退避してから既定値で始める（黙って上書きしない）。
-pub fn load(path: &Path) -> (Config, Option<String>) {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Config::default(), None),
-        Err(e) => return (Config::default(), Some(format!("設定を読めませんでした: {e}"))),
-    };
-    match serde_json::from_str::<Config>(&text) {
-        Ok(c) => (c, None),
-        Err(e) => {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let broken = path.with_extension(format!("json.broken-{stamp}"));
-            let moved = std::fs::rename(path, &broken).is_ok();
-            let note = if moved {
-                format!("設定が壊れていたので {} へ退避しました: {e}", broken.display())
-            } else {
-                format!("設定が壊れています（退避にも失敗）: {e}")
-            };
-            (Config::default(), Some(note))
-        }
-    }
+/// 読み込む。無ければ既定値。読めなければ退避してから既定値で始め、退避もできなければ保存しない（`store.rs`）
+pub fn load(path: &Path) -> Loaded<Config> {
+    store::load_json(path, "設定")
 }
 
+/// 一時ファイルに書いてから置き換える
 pub fn save(path: &Path, config: &Config) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let json = serde_json::to_string_pretty(config)?;
-    // 書きかけで落ちても元の設定が残るように、一時ファイルに書いてから置き換える
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    store::save_text(path, &serde_json::to_string_pretty(config)?)
 }
 
 #[cfg(test)]
@@ -211,5 +187,75 @@ mod tests {
         assert!(c.auto_update);
         assert_eq!(c.sort, SortKey::Relevance);
         assert_eq!(c.kind_filter, KindFilter::All);
+    }
+
+    /// v0.1.0 の設定ファイル（並べ替え・種類・自動更新が無い）を、項目を落とさずに読む
+    #[test]
+    fn reads_old_file_without_newer_fields() {
+        let old = r#"{
+  "roots": ["D:/素材", "E:/SE"],
+  "extensions": "png wav",
+  "all_files": true,
+  "include_hidden": true
+}"#;
+        let c: Config = serde_json::from_str(old).unwrap();
+        assert_eq!(c.roots, vec![PathBuf::from("D:/素材"), PathBuf::from("E:/SE")]);
+        assert_eq!(c.extensions, "png wav");
+        assert!(c.all_files && c.include_hidden && c.auto_update);
+        assert_eq!((c.kind_filter, c.sort, c.descending), (KindFilter::All, SortKey::Relevance, false));
+    }
+
+    /// 新しい版が足した列挙の値・知らない項目があっても、ほかの項目（検索するフォルダ）は残す
+    #[test]
+    fn unknown_enum_values_fall_back_without_dropping_file() {
+        let newer = r#"{
+  "roots": ["D:/素材"],
+  "extensions": "png",
+  "kind_filter": "Font",
+  "sort": "Duration",
+  "descending": true,
+  "future_option": 1
+}"#;
+        let c: Config = serde_json::from_str(newer).unwrap();
+        assert_eq!(c.roots, vec![PathBuf::from("D:/素材")]);
+        assert_eq!(c.extensions, "png");
+        assert_eq!(c.kind_filter, KindFilter::All);
+        assert_eq!(c.sort, SortKey::Relevance);
+        assert!(c.descending);
+
+        // 知っている値はそのまま読む
+        let c: Config = serde_json::from_str(r#"{"kind_filter":"Audio","sort":"InsertCount"}"#).unwrap();
+        assert_eq!((c.kind_filter, c.sort), (KindFilter::Audio, SortKey::InsertCount));
+    }
+
+    #[test]
+    fn roundtrips_all_enum_values() {
+        for kind_filter in KindFilter::ALL {
+            for sort in SortKey::ALL {
+                let c = Config { kind_filter, sort, ..Config::default() };
+                let back: Config = serde_json::from_str(&serde_json::to_string_pretty(&c).unwrap()).unwrap();
+                assert_eq!(back, c);
+            }
+        }
+    }
+
+    /// 読めないファイルは退避して既定値。退避した中身は元のまま
+    #[test]
+    fn load_moves_broken_file_aside_and_save_writes_back() {
+        let dir = crate::store::tests::temp_dir("config");
+        let p = dir.join("config.json");
+        std::fs::write(&p, "{\"roots\": [").unwrap();
+        let r = load(&p);
+        assert_eq!(r.value, Config::default());
+        assert!(r.writable);
+        assert!(!p.exists());
+        assert_eq!(crate::store::tests::names_starting_with(&dir, "config.json.broken-").len(), 1);
+
+        let c = Config { roots: vec![PathBuf::from("D:/素材")], sort: SortKey::Size, ..Config::default() };
+        save(&p, &c).unwrap();
+        let r = load(&p);
+        assert_eq!(r.value, c);
+        assert!(r.warning.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

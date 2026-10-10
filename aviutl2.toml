@@ -1,0 +1,26 @@
+#:schema ./.aviutl2-cli/aviutl2.schema.json
+#
+# ビルドと配布の設定（aviutl2-cli: https://github.com/sevenc-nanashi/aviutl2-cli）。
+#   au2 release   ビルドして release/ に au2pkg とカタログ用の catalog.json を作る
+# project.version は Cargo.toml の version と揃える。
+
+[project]
+id = "HexBrowns.FileFinder_H"
+name = "FileFinder_H"
+version = "0.2.2"
+
+[artifacts."FileFinder_H.aux2"]
+build = "cargo build --release"
+source = "target/release/file_finder_h.dll"
+destination = "Plugin/FileFinder_H/FileFinder_H.aux2"
+
+[release]
+# インストール時のダイアログに、本体と依存クレートのライセンスを出す
+prebuild = ['copy /b /y LICENSE + THIRD_PARTY_CRATES.md release\package.txt >nul']
+package_template = "release/package.txt"
+package_information = "{name} v{version} by HexBrowns"
+
+[catalog]
+id = "HexBrowns.FileFinder_H"
+license_path = { type = "MIT", path = "./LICENSE" }
+download_repo = { owner = "HexBrowns", repo = "FileFinder_H" }

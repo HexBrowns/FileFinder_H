@@ -11,6 +11,7 @@ mod index;
 mod kana;
 mod query;
 mod shutdown;
+mod store;
 mod watcher;
 
 use aviutl2::{AnyResult, tracing};

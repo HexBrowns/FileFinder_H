@@ -57,11 +57,15 @@ pub(crate) struct FileFinderApp {
     handle: AviUtl2EframeHandle,
     config: Config,
     config_path: PathBuf,
+    /// false なら設定ファイルを読めず退避もできなかったので、この起動の間は保存しない
+    config_writable: bool,
     scanner: Scanner,
     watcher: Option<FolderWatcher>,
     matcher: nucleo_matcher::Matcher,
     history: History,
     history_path: PathBuf,
+    /// false なら挿入履歴を読めず退避もできなかったので、この起動の間は保存しない
+    history_writable: bool,
     history_gen: u64,
 
     needle: String,
@@ -104,10 +108,12 @@ impl FileFinderApp {
         cc.egui_ctx.set_fonts(aviutl2_eframe::aviutl2_fonts());
 
         let config_path = config::default_path();
-        let (config, config_warning) = config::load(&config_path);
+        let config = config::load(&config_path);
         let history_path = history::default_path();
-        let (history, history_warning) = history::load(&history_path);
-        let warning = [config_warning, history_warning].into_iter().flatten().join(" / ");
+        let history = history::load(&history_path);
+        let warning = [config.warning, history.warning].into_iter().flatten().join(" / ");
+        let (config, config_writable) = (config.value, config.writable);
+        let (history, history_writable) = (history.value, history.writable);
         if !warning.is_empty() {
             tracing::warn!("FileFinder_H: {warning}");
         }
@@ -117,11 +123,13 @@ impl FileFinderApp {
             draft: config.clone(),
             config,
             config_path,
+            config_writable,
             scanner: Scanner::default(),
             watcher: None,
             matcher: nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT.match_paths()),
             history,
             history_path,
+            history_writable,
             history_gen: 0,
             needle: String::new(),
             results: None,
@@ -151,6 +159,16 @@ impl FileFinderApp {
     }
 
     fn save_config(&mut self) {
+        if !self.config_writable {
+            self.set_status(
+                format!(
+                    "設定ファイルを読めなかったので、この起動の間は設定を保存しません: {}",
+                    self.config_path.display()
+                ),
+                true,
+            );
+            return;
+        }
         if let Err(e) = config::save(&self.config_path, &self.config) {
             tracing::warn!("FileFinder_H: 設定を保存できませんでした: {e:#}");
             self.set_status(format!("設定を保存できませんでした: {e:#}"), true);
@@ -191,8 +209,26 @@ impl FileFinderApp {
     fn record_use(&mut self, path: &Path) {
         self.history.bump(path, now_secs());
         self.history_gen += 1;
+        self.save_history();
+    }
+
+    /// 読めなかった履歴ファイルは上書きしない（起動時に知らせてある）
+    fn save_history(&mut self) -> bool {
+        if !self.history_writable {
+            return false;
+        }
         if let Err(e) = history::save(&self.history_path, &self.history) {
             tracing::warn!("FileFinder_H: 挿入履歴を保存できませんでした: {e:#}");
+        }
+        true
+    }
+
+    /// 自分のウィンドウ（フォルダ選択ダイアログのオーナーを求める元）
+    fn own_hwnd(&self) -> Option<isize> {
+        use aviutl2::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match self.handle.window_handle().ok()?.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+            _ => None,
         }
     }
 }
@@ -587,7 +623,7 @@ impl FileFinderApp {
             ui.add_space(4.0);
             if ui.button("フォルダを追加…").clicked() {
                 self.open_settings();
-                self.dialog = Some(crate::folder_dialog::pick_folder_async(ui.ctx().clone()));
+                self.dialog = Some(crate::folder_dialog::pick_folder_async(ui.ctx().clone(), self.own_hwnd()));
             }
             return;
         }
@@ -964,7 +1000,7 @@ impl FileFinderApp {
             .add_enabled(!picking, egui::Button::new(if picking { "選択中…" } else { "フォルダを追加…" }))
             .clicked()
         {
-            self.dialog = Some(crate::folder_dialog::pick_folder_async(ui.ctx().clone()));
+            self.dialog = Some(crate::folder_dialog::pick_folder_async(ui.ctx().clone(), self.own_hwnd()));
         }
         ui.horizontal(|ui| {
             let te = egui::TextEdit::singleline(&mut self.new_root_text)
@@ -1006,8 +1042,14 @@ impl FileFinderApp {
             if armed {
                 self.history.clear();
                 self.history_gen += 1;
-                if let Err(e) = history::save(&self.history_path, &self.history) {
-                    tracing::warn!("FileFinder_H: 挿入履歴を保存できませんでした: {e:#}");
+                if !self.save_history() {
+                    self.set_status(
+                        format!(
+                            "挿入履歴のファイルを読めなかったので、この起動の間は保存しません（消去はこの起動の間だけ）: {}",
+                            self.history_path.display()
+                        ),
+                        true,
+                    );
                 }
                 self.clear_history_armed = None;
             } else {

@@ -25,9 +25,12 @@ Everything（voidtools）の機能の一部（フィルタ・並べ替え・検�
 ## ビルド
 
 ```powershell
-& "C:\ProgramData\aviutl2\AI\plugins\FileFinder_H\build.ps1"
-cargo test   # このフォルダで
+python AI/tools/au2_build.py FileFinder_H               # au2 release → 本番（C:\ProgramData\aviutl2）へ配置
+python AI/tools/au2_build.py FileFinder_H --no-deploy   # 配置しない（本番との違いだけ出す）
+cargo test                                       # このフォルダで
 ```
+
+ビルドと同梱物は `aviutl2.toml`（[aviutl2-cli](https://github.com/sevenc-nanashi/aviutl2-cli)）が正本。このフォルダで `au2 release` だけを実行すると `release/` に au2pkg ができる。
 
 ## 出典
 
